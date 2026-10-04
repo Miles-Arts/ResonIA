@@ -2,10 +2,19 @@ import Foundation
 import Combine
 import AVFoundation
 
+/// Servicio responsable de la captura de notas de voz en alta fidelidad y bajo retardo.
+///
+/// Implementa `AVAudioRecorder` configurado con compresión AAC a 16 kHz mono,
+/// ideal para speech-to-text y minimización del ancho de banda en subida.
 @MainActor
 public final class AudioRecorderService: NSObject, ObservableObject, AVAudioRecorderDelegate {
+    /// Indica si el grabador se encuentra activo capturando audio.
     @Published public private(set) var isRecording = false
+
+    /// Duración acumulada de la grabación actual en segundos.
     @Published public private(set) var recordingDuration: TimeInterval = 0
+
+    /// Nivel de potencia de audio normalizado (0.0 a 1.0) para alimentar animaciones de volumen.
     @Published public private(set) var audioPowerLevel: Float = 0.0
 
     private var audioRecorder: AVAudioRecorder?
@@ -16,6 +25,9 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         super.init()
     }
 
+    /// Solicita de forma asíncrona los permisos del sistema operativo para acceder al micrófono.
+    ///
+    /// - Returns: `true` si el usuario concedió el permiso o `false` en caso contrario.
     public func requestMicrophonePermission() async -> Bool {
         #if os(iOS)
         if #available(iOS 17.0, *) {
@@ -28,14 +40,23 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
             }
         }
         #else
+        // En macOS los permisos son gestionados automáticamente o mediante entitlements
         return true
         #endif
     }
 
+    /// Configura la sesión de audio y arranca una nueva grabación en el directorio temporal.
+    ///
+    /// - Returns: La `URL` del archivo `.m4a` donde se almacenará la pista de voz.
+    /// - Throws: Errores de inicialización de `AVAudioSession` o `AVAudioRecorder`.
     public func startRecording() throws -> URL {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
+        try session.setCategory(
+            .playAndRecord,
+            mode: .voiceChat,
+            options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers]
+        )
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
 
@@ -43,6 +64,7 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         let fileURL = tempDir.appendingPathComponent("nota_oyente_\(UUID().uuidString).m4a")
         self.currentFileURL = fileURL
 
+        // Configuración óptima para reconocimiento de voz: 16 kHz, 1 canal mono, AAC
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
             AVSampleRateKey: 16000.0,
@@ -56,7 +78,11 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         recorder.isMeteringEnabled = true
 
         guard recorder.record() else {
-            throw NSError(domain: "ResonIA.AudioRecorder", code: -1, userInfo: [NSLocalizedDescriptionKey: "No se pudo iniciar el grabador de audio"])
+            throw NSError(
+                domain: "ResonIA.AudioRecorder",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No fue posible inicializar el grabador de audio del sistema."]
+            )
         }
 
         self.audioRecorder = recorder
@@ -68,6 +94,9 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         return fileURL
     }
 
+    /// Detiene la grabación actual y libera los recursos del grabador.
+    ///
+    /// - Returns: La `URL` final del archivo de audio grabado si existió grabación válida.
     public func stopRecording() -> URL? {
         guard isRecording, let recorder = audioRecorder else {
             return nil
@@ -83,26 +112,32 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         return recordedURL
     }
 
+    /// Inicia el temporizador de medición de potencia en el RunLoop `.common`
+    /// para evitar que gestos táctiles continuos congelen el contador.
     private func startMeteringTimer() {
         timer?.invalidate()
         let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, let recorder = self.audioRecorder, recorder.isRecording else { return }
             recorder.updateMeters()
+
             let power = recorder.averagePower(forChannel: 0)
+            // Normalizar dB (-60 dB a 0 dB) al rango [0.0, 1.0]
             let normalized = max(0.0, min(1.0, (power + 60.0) / 60.0))
             self.audioPowerLevel = normalized
             self.recordingDuration = recorder.currentTime
         }
-        // Usar .common para que el timer no se congele durante el gesto táctil/clic continuo
         RunLoop.main.add(t, forMode: .common)
         self.timer = t
     }
 
+    /// Cancela y libera el temporizador de medición.
     private func stopMeteringTimer() {
         timer?.invalidate()
         timer = nil
         audioPowerLevel = 0.0
     }
+
+    // MARK: - AVAudioRecorderDelegate
 
     public nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         Task { @MainActor in

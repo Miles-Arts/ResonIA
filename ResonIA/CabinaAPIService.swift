@@ -1,10 +1,20 @@
 import Foundation
 
+/// Estructura de respuesta devuelta por el endpoint `GET /token`.
 public struct TokenResponse: Codable, Sendable {
+    /// Estado del servicio.
     public let status: String
+
+    /// Nombre de la sala WebRTC asignada.
     public let room: String
+
+    /// Identidad registrada en la sesión de LiveKit.
     public let identity: String
+
+    /// Token JWT firmado para autenticación en la sala.
     public let token: String
+
+    /// URL del servidor LiveKit WebRTC.
     public let serverUrl: String
 
     enum CodingKeys: String, CodingKey {
@@ -16,14 +26,22 @@ public struct TokenResponse: Codable, Sendable {
     }
 }
 
+/// Cliente de red asíncrono para la comunicación HTTP con el backend de Cabina FastAPI.
 public final class CabinaAPIService: Sendable {
+    /// Instancia compartida (Singleton) del servicio.
     public static let shared = CabinaAPIService()
 
     private let defaultBaseURL = "http://127.0.0.1:8000"
 
     public init() {}
 
-    /// Obtiene automáticamente un token JWT para conectar a la sala LiveKit
+    /// Solicita un token JWT firmado al backend para autenticar la conexión WebRTC.
+    ///
+    /// - Parameters:
+    ///   - identity: Identificador único asignado al oyente.
+    ///   - baseURLString: URL base opcional del servidor (por defecto http://127.0.0.1:8000).
+    /// - Returns: Instancia de `TokenResponse` con el JWT y la sala.
+    /// - Throws: `URLError` si la URL es inválida o el servidor responde con error.
     public func obtenerToken(
         identity: String,
         baseURLString: String? = nil
@@ -46,6 +64,13 @@ public final class CabinaAPIService: Sendable {
         return try JSONDecoder().decode(TokenResponse.self, from: data)
     }
 
+    /// Sube una nota de voz mediante multipart/form-data al backend para su procesamiento por IA.
+    ///
+    /// - Parameters:
+    ///   - fileURL: Ubicación en disco del archivo de audio grabado (.m4a / .wav).
+    ///   - baseURLString: URL base opcional del servidor FastAPI.
+    /// - Returns: Objeto `AudioProcessResponse` con la transcripción y el resumen moderado.
+    /// - Throws: Error de red o decodificación si el procesamiento falla.
     public func procesarAudio(
         fileURL: URL,
         baseURLString: String? = nil
@@ -65,13 +90,21 @@ public final class CabinaAPIService: Sendable {
 
         var body = Data()
 
-        // Campo 'file' esperado por FastAPI: UploadFile = File(...)
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileURL.lastPathComponent)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
+        // Construcción segura del cuerpo multipart sin 'force unwrap'
+        func append(_ string: String) {
+            if let stringData = string.data(using: .utf8) {
+                body.append(stringData)
+            }
+        }
+
+        let sanitizedFilename = fileURL.lastPathComponent.replacingOccurrences(of: "\"", with: "")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(sanitizedFilename)\"\r\n")
+        append("Content-Type: audio/m4a\r\n\r\n")
         body.append(audioData)
-        body.append("\r\n".data(using: .utf8)!)
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        append("\r\n")
+        append("--\(boundary)--\r\n")
 
         let (data, response) = try await URLSession.shared.upload(for: request, from: body)
 
@@ -88,11 +121,13 @@ public final class CabinaAPIService: Sendable {
             )
         }
 
-        let decoder = JSONDecoder()
-        return try decoder.decode(AudioProcessResponse.self, from: data)
+        return try JSONDecoder().decode(AudioProcessResponse.self, from: data)
     }
 
-    /// Comprueba la conectividad básica con el backend FastAPI
+    /// Comprueba la conectividad y disponibilidad del backend.
+    ///
+    /// - Parameter baseURLString: URL base del servidor a inspeccionar.
+    /// - Returns: `true` si el servidor responde con código 200, `false` en caso contrario.
     public func verificarSalud(baseURLString: String? = nil) async -> Bool {
         let host = baseURLString ?? defaultBaseURL
         guard let url = URL(string: "\(host)/docs") else { return false }

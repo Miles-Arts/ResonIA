@@ -3,29 +3,52 @@ import Combine
 import SwiftUI
 import LiveKit
 
+/// Estados posibles de la cabina interactiva de ResonIA.
 public enum CabinaState: Equatable, Sendable {
+    /// Desconectado del servidor WebRTC.
     case desconectado
+
+    /// Negociando conexión WebSockets o solicitando credenciales.
     case conectando
+
+    /// Sintonizado y escuchando la sala en vivo.
     case enVivo
+
+    /// Capturando la voz del usuario tras mantener presionado el botón.
     case grabando
+
+    /// Subiendo el archivo de audio al servidor FastAPI.
     case enviandoACabina
+
+    /// Procesando transcripción con faster-whisper y redacción con Ollama.
     case procesandoIA
+
+    /// El Productor IA está transmitiendo la locución por WebRTC.
     case locutorAlAire
+
+    /// Ocurrió un error en la comunicación o procesamiento.
     case error(String)
 }
 
+/// Orquestador principal de la experiencia de usuario y máquina de estados de la cabina.
 @MainActor
 public final class RoomViewModel: ObservableObject {
+    // MARK: - Propiedades Publicadas de Configuración
+
     @Published public var liveKitURL: String = "ws://127.0.0.1:7880"
     @Published public var fastAPIURL: String = "http://127.0.0.1:8000"
     @Published public var token: String = ""
     @Published public var roomName: String = "cabina-resonia"
     @Published public var listenerIdentity: String = "oyente-\(Int.random(in: 1000...9999))"
 
+    // MARK: - Estado de la Interfaz
+
     @Published public private(set) var currentState: CabinaState = .desconectado
     @Published public private(set) var statusMessage: String = "Desconectado de la cabina"
     @Published public private(set) var lastResponse: AudioProcessResponse?
     @Published public private(set) var errorMessage: String?
+
+    // MARK: - Dependencias
 
     public let liveKitService: LiveKitService
     public let recorderService: AudioRecorderService
@@ -33,6 +56,7 @@ public final class RoomViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
+    /// Inicializador por defecto que instancia los servicios de producción.
     public init() {
         self.liveKitService = LiveKitService()
         self.recorderService = AudioRecorderService()
@@ -41,6 +65,7 @@ public final class RoomViewModel: ObservableObject {
         bindServices()
     }
 
+    /// Inicializador con inyección de dependencias para facilitar testing y mockeo.
     public init(
         liveKitService: LiveKitService,
         recorderService: AudioRecorderService,
@@ -53,8 +78,9 @@ public final class RoomViewModel: ObservableObject {
         bindServices()
     }
 
+    /// Configura los observadores de Combine para reaccionar a cambios en los servicios subyacentes.
     private func bindServices() {
-        // Propagar cambios del grabador para que SwiftUI actualice el contador de segundos y el vúmetro
+        // Propagar actualizaciones del grabador para redibujar medidores y cronómetro en SwiftUI
         recorderService.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -62,7 +88,7 @@ public final class RoomViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observar estado de conexión de LiveKit
+        // Monitorear estado de conexión de LiveKit
         liveKitService.$connectionState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
@@ -81,12 +107,12 @@ public final class RoomViewModel: ObservableObject {
                     self.statusMessage = "Desconectado de la cabina"
                 @unknown default:
                     self.currentState = .desconectado
-                    self.statusMessage = "Estado desconocido"
+                    self.statusMessage = "Estado de cabina no disponible"
                 }
             }
             .store(in: &cancellables)
 
-        // Observar actividad del locutor IA
+        // Monitorear actividad del locutor virtual
         liveKitService.$isLocutorSpeaking
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isSpeaking in
@@ -102,8 +128,9 @@ public final class RoomViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    // MARK: - Conexión Automática con Backend
+    // MARK: - Gestión de Conexión Automática
 
+    /// Obtiene automáticamente credenciales del backend y se conecta a la sala de LiveKit.
     public func conectarAutomaticamente() {
         currentState = .conectando
         statusMessage = "Solicitando credenciales a cabina..."
@@ -132,6 +159,7 @@ public final class RoomViewModel: ObservableObject {
         }
     }
 
+    /// Conecta a la sala utilizando credenciales manuales o dispara auto-conexión si no existen.
     public func conectarACabina() {
         if token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             conectarAutomaticamente()
@@ -155,6 +183,7 @@ public final class RoomViewModel: ObservableObject {
         }
     }
 
+    /// Cierra la sesión activa con la sala de transmisión.
     public func desconectarDeCabina() {
         Task {
             await liveKitService.disconnect()
@@ -163,13 +192,14 @@ public final class RoomViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Grabación Push-to-Talk y Envío a Cabina IA
+    // MARK: - Flujo Push-to-Talk
 
+    /// Inicia la grabación del micrófono tras validar los permisos correspondientes.
     public func iniciarGrabacion() {
         Task {
             let granted = await recorderService.requestMicrophonePermission()
             guard granted else {
-                self.errorMessage = "Permiso de micrófono denegado en Ajustes de iOS."
+                self.errorMessage = "Permiso de micrófono denegado en Ajustes del sistema."
                 return
             }
 
@@ -184,6 +214,7 @@ public final class RoomViewModel: ObservableObject {
         }
     }
 
+    /// Detiene la grabación y sube el archivo de audio al backend para su procesamiento.
     public func soltarYEnviarGrabacion() {
         guard let audioURL = recorderService.stopRecording() else {
             if currentState == .grabando {
@@ -214,14 +245,14 @@ public final class RoomViewModel: ObservableObject {
                     self.statusMessage = "Nota filtrada por moderación."
                 }
 
-                // Restaurar estado según conexión LiveKit tras breve pausa
+                // Restaurar estado según la conexión activa tras 2 segundos
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if self.currentState != .locutorAlAire {
                     self.currentState = self.liveKitService.connectionState == .connected ? .enVivo : .desconectado
                     self.statusMessage = self.liveKitService.connectionState == .connected ? "En vivo en \(self.roomName)" : "Listo"
                 }
 
-                // Eliminar archivo temporal
+                // Limpieza de archivo temporal
                 try? FileManager.default.removeItem(at: audioURL)
             } catch {
                 self.currentState = .error(error.localizedDescription)
