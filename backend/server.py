@@ -62,6 +62,28 @@ def generar_token(identity: str, name: str, can_publish: bool = False) -> str:
     )
     return token
 
+def normalizar_locucion(texto: str) -> str:
+    """Garantiza que la frase comience una sola vez con la introducción y no se duplique."""
+    frase_intro = "Un oyente nos envía un mensaje que dice:"
+    t = texto.strip().strip('"\'')
+
+    # Eliminar posibles anidaciones o repeticiones de la introducción
+    while True:
+        pos1 = t.find(frase_intro)
+        if pos1 != -1:
+            resto = t[pos1 + len(frase_intro):].strip().strip('":\'')
+            pos2 = resto.find(frase_intro)
+            if pos2 != -1:
+                t = frase_intro + " " + resto[pos2 + len(frase_intro):].strip().strip('":\'')
+                continue
+        break
+
+    if not t.startswith(frase_intro):
+        t = f"{frase_intro} {t}"
+
+    cuerpo = t[len(frase_intro):].strip().strip('"\'')
+    return f"{frase_intro} {cuerpo}"
+
 async def resumir_con_ollama(texto_oyente: str) -> str:
     prompt = f"""Eres el locutor y productor principal de cabina de una emisora de radio en vivo.
 Tu tarea es presentar al aire los mensajes de voz de los oyentes.
@@ -70,10 +92,10 @@ Mensaje del oyente: "{texto_oyente}"
 
 Instrucciones:
 1. MODERACIÓN: Si el mensaje contiene insultos explícitos, groserías o agresiones directas, responde únicamente: RECHAZADO.
-2. LOCUCIÓN RADIAL: Si el mensaje es apto, preséntalo al aire comenzando exactamente con: "Un oyente nos envía un mensaje que dice:" seguido del mensaje o resumen en tono cálido y profesional (oración completa, entre 15 y 25 palabras).
-3. IMPORTANTE: Concluye la oración de forma completa, sin dejar puntos suspensivos ni frases inconclusas.
+2. LOCUCIÓN RADIAL: Si el mensaje es apto, redáctalo para el aire. Inicia tu respuesta una sola vez con: "Un oyente nos envía un mensaje que dice:" y continúa con el mensaje o resumen de forma fluida y cálida (frase completa de 15 a 25 palabras).
+3. IMPORTANTE: No repitas la introducción, no anides comillas, y concluye la idea de forma clara.
 
-Responde únicamente con la frase de radio terminada o con RECHAZADO:"""
+Responde únicamente con la frase de radio o con RECHAZADO:"""
 
     async with httpx.AsyncClient(timeout=25.0) as client:
         res = await client.post(
@@ -88,8 +110,12 @@ Responde únicamente con la frase de radio terminada o con RECHAZADO:"""
             }
         )
         res.raise_for_status()
-        texto_limpio = res.json().get("response", "").strip()
-        return texto_limpio.strip('"\'')
+        raw_text = res.json().get("response", "").strip()
+        
+        if "RECHAZADO" in raw_text:
+            return "RECHAZADO"
+
+        return normalizar_locucion(raw_text)
 
 def obtener_ruta_piper() -> str:
     """Encuentra la ruta exacta del binario de Piper dentro del entorno virtual."""
@@ -175,6 +201,7 @@ async def emitir_audio_en_sala(audio_path: str):
                 await source.capture_frame(frame)
                 await asyncio.sleep(0.02)
 
+            # Inyectar 300 ms de silencio final para que el códec no corte la última palabra
             silencio = b"\x00" * (chunk_samples * num_channels * sample_width)
             silence_frame = rtc.AudioFrame(
                 data=silencio,
@@ -233,7 +260,7 @@ async def procesar_audio(file: UploadFile = File(...)):
 
         print("🧠 [3/4] Consultando a Ollama...")
         resumen = await resumir_con_ollama(texto_transcrito)
-        print(f"   Respuesta Ollama: \"{resumen}\"")
+        print(f"   Respuesta procesada: \"{resumen}\"")
 
         es_limpio = "RECHAZADO" not in resumen
 

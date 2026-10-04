@@ -24,7 +24,7 @@ public struct ContentView: View {
 
                     Spacer()
 
-                    // Visualizador de audio mientras graba
+                    // Visualizador de audio mientras graba (contador de tiempo y barra de decibelios)
                     if viewModel.currentState == .grabando {
                         visualizadorAudio
                             .transition(.opacity)
@@ -223,7 +223,7 @@ public struct ContentView: View {
                         .fill(Color.white.opacity(0.1))
                     Capsule()
                         .fill(Color.red)
-                        .frame(width: proxy.size.width * CGFloat(viewModel.recorderService.audioPowerLevel))
+                        .frame(width: max(4, proxy.size.width * CGFloat(viewModel.recorderService.audioPowerLevel)))
                 }
             }
             .frame(height: 8)
@@ -233,42 +233,39 @@ public struct ContentView: View {
 
     private var botonPushToTalk: some View {
         VStack(spacing: 12) {
-            Button(action: {}) {
-                ZStack {
-                    // Círculo exterior pulsante al grabar
-                    Circle()
-                        .fill(viewModel.currentState == .grabando ? Color.red.opacity(0.25) : Color.cyan.opacity(0.12))
-                        .frame(width: 140, height: 140)
-                        .scaleEffect(viewModel.currentState == .grabando ? (1.0 + CGFloat(viewModel.recorderService.audioPowerLevel) * 0.3) : 1.0)
-                        .animation(.easeOut(duration: 0.15), value: viewModel.recorderService.audioPowerLevel)
+            ZStack {
+                // Círculo exterior pulsante al grabar
+                Circle()
+                    .fill(viewModel.currentState == .grabando ? Color.red.opacity(0.25) : Color.cyan.opacity(0.12))
+                    .frame(width: 140, height: 140)
+                    .scaleEffect(viewModel.currentState == .grabando ? (1.0 + CGFloat(viewModel.recorderService.audioPowerLevel) * 0.35) : 1.0)
+                    .animation(.easeOut(duration: 0.1), value: viewModel.recorderService.audioPowerLevel)
 
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: viewModel.currentState == .grabando
-                                    ? [Color.red, Color(red: 0.8, green: 0.1, blue: 0.1)]
-                                    : [Color.cyan, Color(red: 0.1, green: 0.4, blue: 0.8)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: viewModel.currentState == .grabando
+                                ? [Color.red, Color(red: 0.8, green: 0.1, blue: 0.1)]
+                                : [Color.cyan, Color(red: 0.1, green: 0.4, blue: 0.8)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
                         )
-                        .frame(width: 100, height: 100)
-                        .shadow(
-                            color: viewModel.currentState == .grabando ? Color.red.opacity(0.5) : Color.cyan.opacity(0.3),
-                            radius: 12
-                        )
+                    )
+                    .frame(width: 100, height: 100)
+                    .shadow(
+                        color: viewModel.currentState == .grabando ? Color.red.opacity(0.5) : Color.cyan.opacity(0.3),
+                        radius: 12
+                    )
 
-                    VStack(spacing: 4) {
-                        Image(systemName: viewModel.currentState == .grabando ? "waveform.and.mic" : "mic.fill")
-                            .font(.system(size: 34))
-                            .foregroundColor(.white)
-                    }
-                }
+                Image(systemName: viewModel.currentState == .grabando ? "waveform.and.mic" : "mic.fill")
+                    .font(.system(size: 34))
+                    .foregroundColor(.white)
             }
-            .simultaneousGesture(
+            .contentShape(Circle())
+            .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
-                        if viewModel.currentState != .grabando && viewModel.currentState != .enviandoACabina {
+                        if viewModel.currentState != .grabando && viewModel.currentState != .enviandoACabina && viewModel.currentState != .procesandoIA {
                             viewModel.iniciarGrabacion()
                         }
                     }

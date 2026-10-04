@@ -54,6 +54,14 @@ public final class RoomViewModel: ObservableObject {
     }
 
     private func bindServices() {
+        // Propagar cambios del grabador para que SwiftUI actualice el contador de segundos y el vúmetro
+        recorderService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
         // Observar estado de conexión de LiveKit
         liveKitService.$connectionState
             .receive(on: DispatchQueue.main)
