@@ -70,9 +70,7 @@ Mensaje del oyente: "{texto_oyente}"
 
 Instrucciones:
 1. MODERACIÓN: Si el mensaje contiene insultos explícitos, groserías o agresiones directas, responde únicamente: RECHAZADO.
-2. LOCUCIÓN RADIAL: Si el mensaje es apto, redáctalo en una frase completa, cálida y natural (entre 15 y 25 palabras). Debe sonar como locutor profesional al aire, por ejemplo:
-   - "Un oyente nos saluda con entusiasmo desde Bogotá y nos envía un abrazo a toda la audiencia."
-   - "Nos comparten desde la sintonía que les encanta la programación musical de hoy."
+2. LOCUCIÓN RADIAL: Si el mensaje es apto, preséntalo al aire comenzando exactamente con: "Un oyente nos envía un mensaje que dice:" seguido del mensaje o resumen en tono cálido y profesional (oración completa, entre 15 y 25 palabras).
 3. IMPORTANTE: Concluye la oración de forma completa, sin dejar puntos suspensivos ni frases inconclusas.
 
 Responde únicamente con la frase de radio terminada o con RECHAZADO:"""
@@ -91,7 +89,6 @@ Responde únicamente con la frase de radio terminada o con RECHAZADO:"""
         )
         res.raise_for_status()
         texto_limpio = res.json().get("response", "").strip()
-        # Asegurar que no quede entre comillas residuales
         return texto_limpio.strip('"\'')
 
 def obtener_ruta_piper() -> str:
@@ -161,7 +158,6 @@ async def emitir_audio_en_sala(audio_path: str):
             publication = await room.local_participant.publish_track(track, options)
             print(f"🎙️ Pista de audio publicada en cabina: {publication.sid}")
 
-            # Bloques de 20 ms
             chunk_samples = int(sample_rate * 0.02)
             print("▶️ Emitiendo locución al aire a través de WebRTC...")
             while True:
@@ -179,7 +175,6 @@ async def emitir_audio_en_sala(audio_path: str):
                 await source.capture_frame(frame)
                 await asyncio.sleep(0.02)
 
-            # Inyectar 300 ms de silencio final para evitar que el códec corte la última palabra
             silencio = b"\x00" * (chunk_samples * num_channels * sample_width)
             silence_frame = rtc.AudioFrame(
                 data=silencio,
@@ -187,12 +182,11 @@ async def emitir_audio_en_sala(audio_path: str):
                 num_channels=num_channels,
                 samples_per_channel=chunk_samples
             )
-            for _ in range(15):  # 15 * 20ms = 300ms de cola limpia
+            for _ in range(15):
                 await source.capture_frame(silence_frame)
                 await asyncio.sleep(0.02)
 
             print("⏹️ Emisión de frames completada. Esperando drenado de buffers WebRTC...")
-            # IMPORTANTE: Esperar 1.8 segundos para que los buffers de jitter y altavoces en iOS terminen de reproducir todo
             await asyncio.sleep(1.8)
 
             await room.local_participant.unpublish_track(publication.sid)
