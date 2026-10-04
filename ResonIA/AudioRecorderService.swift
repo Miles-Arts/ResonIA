@@ -62,6 +62,7 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
         self.audioRecorder = recorder
         self.isRecording = true
         self.recordingDuration = 0
+        self.audioPowerLevel = 0.0
 
         startMeteringTimer()
         return fileURL
@@ -84,7 +85,7 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
 
     private func startMeteringTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, let recorder = self.audioRecorder, recorder.isRecording else { return }
             recorder.updateMeters()
             let power = recorder.averagePower(forChannel: 0)
@@ -92,6 +93,9 @@ public final class AudioRecorderService: NSObject, ObservableObject, AVAudioReco
             self.audioPowerLevel = normalized
             self.recordingDuration = recorder.currentTime
         }
+        // Usar .common para que el timer no se congele durante el gesto táctil/clic continuo
+        RunLoop.main.add(t, forMode: .common)
+        self.timer = t
     }
 
     private func stopMeteringTimer() {

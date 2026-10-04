@@ -32,3 +32,19 @@ Network Trash Folder
 Temporary Items
 .Spotlight-V100
 .Trashes
+
+# Python / Backend
+backend/.venv/
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/*.wav
+backend/*.onnx
+backend/*.onnx.json
+backend/*.bak
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.wav
+*.bak
