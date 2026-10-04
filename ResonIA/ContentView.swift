@@ -1,14 +1,21 @@
 import SwiftUI
 import LiveKit
 
+/// Vista principal de la cabina de radio interactiva ResonIA.
+///
+/// Proporciona una interfaz inspirada en un estudio de radiodifusión moderno,
+/// con botón táctil estilo Walkie-Talkie (Push-to-Talk), telemetría de decibelios,
+/// banner de transmisión "AL AIRE" y visualización de intervenciones procesadas.
 public struct ContentView: View {
     @StateObject private var viewModel = RoomViewModel()
     @State private var showingSettings = false
 
+    public init() {}
+
     public var body: some View {
         NavigationStack {
             ZStack {
-                // Fondo temático de cabina radial nocturna
+                // Fondo oscuro temático de estudio radial
                 Color(red: 0.05, green: 0.06, blue: 0.10)
                     .ignoresSafeArea()
 
@@ -24,13 +31,13 @@ public struct ContentView: View {
 
                     Spacer()
 
-                    // Visualizador de audio mientras graba (contador de tiempo y barra de decibelios)
+                    // Visualizador reactivo de decibelios y tiempo al grabar
                     if viewModel.currentState == .grabando {
                         visualizadorAudio
                             .transition(.opacity)
                     }
 
-                    // Botón Walkie-Talkie / Push-to-Talk
+                    // Botón central Push-to-Talk
                     botonPushToTalk
 
                     Spacer(minLength: 20)
@@ -50,13 +57,15 @@ public struct ContentView: View {
                         Image(systemName: "slider.horizontal.3")
                             .foregroundColor(.cyan)
                     }
+                    .accessibilityLabel("Ajustes de cabina")
+                    .accessibilityHint("Abre la configuración de conexión del servidor")
                 }
             }
             .sheet(isPresented: $showingSettings) {
                 configuracionSheet
             }
             .onAppear {
-                // Auto-sintonizar la cabina al abrir la app
+                // Sintonizar automáticamente la sala al iniciar la app
                 if viewModel.liveKitService.connectionState == .disconnected {
                     viewModel.conectarAutomaticamente()
                 }
@@ -66,6 +75,7 @@ public struct ContentView: View {
 
     // MARK: - Subvistas
 
+    /// Cabecera superior con el nombre de la sala, estado de conexión y oyentes activos.
     private var cabeceraCabina: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -98,8 +108,8 @@ public struct ContentView: View {
                 .padding(.vertical, 6)
                 .background(Color.cyan.opacity(0.15))
                 .clipShape(Capsule())
+                .accessibilityLabel("Sintonizar cabina")
             } else {
-                // Indicador de oyentes conectados
                 HStack(spacing: 5) {
                     Image(systemName: "person.2.fill")
                         .font(.caption)
@@ -111,6 +121,8 @@ public struct ContentView: View {
                 .padding(.vertical, 6)
                 .background(Color.white.opacity(0.08))
                 .clipShape(Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(viewModel.liveKitService.participantCount) oyentes conectados")
             }
         }
         .padding()
@@ -118,6 +130,7 @@ public struct ContentView: View {
         .cornerRadius(16)
     }
 
+    /// Banner de alerta visual cuando el Productor IA está transmitiendo voz.
     private var alAireBanner: some View {
         HStack(spacing: 12) {
             Circle()
@@ -153,8 +166,11 @@ public struct ContentView: View {
                 .stroke(Color.red.opacity(0.35), lineWidth: 1)
         )
         .cornerRadius(14)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Al aire, productor de inteligencia artificial transmitiendo")
     }
 
+    /// Tarjeta de historial con la última transcripción y la locución producida.
     private var tarjetaResumenIA: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -207,6 +223,7 @@ public struct ContentView: View {
         )
     }
 
+    /// Cronómetro y barra de decibelios reactiva al volumen de voz en vivo.
     private var visualizadorAudio: some View {
         HStack(spacing: 8) {
             Image(systemName: "record.circle")
@@ -216,7 +233,6 @@ public struct ContentView: View {
                 .font(.system(.body, design: .monospaced).bold())
                 .foregroundColor(.white)
 
-            // Barra reactiva al volumen de voz
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule()
@@ -229,12 +245,15 @@ public struct ContentView: View {
             .frame(height: 8)
         }
         .padding(.horizontal)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Tiempo de grabación: \(Int(viewModel.recorderService.recordingDuration)) segundos")
     }
 
+    /// Botón táctil Push-to-Talk con retroalimentación visual reactiva al habla.
     private var botonPushToTalk: some View {
         VStack(spacing: 12) {
             ZStack {
-                // Círculo exterior pulsante al grabar
+                // Anillo de pulso exterior sensible a decibelios
                 Circle()
                     .fill(viewModel.currentState == .grabando ? Color.red.opacity(0.25) : Color.cyan.opacity(0.12))
                     .frame(width: 140, height: 140)
@@ -275,6 +294,8 @@ public struct ContentView: View {
                         }
                     }
             )
+            .accessibilityLabel(viewModel.currentState == .grabando ? "Grabando voz" : "Botón para hablar")
+            .accessibilityHint("Mantén presionado para hablar y suelta para enviar tu nota a la cabina")
 
             Text(viewModel.currentState == .grabando ? "Suelta para enviar a cabina" : "Mantén presionado para hablar")
                 .font(.footnote.bold())
@@ -282,6 +303,7 @@ public struct ContentView: View {
         }
     }
 
+    /// Hoja de configuración para personalizar los servidores o reconectar manualmente.
     private var configuracionSheet: some View {
         NavigationStack {
             Form {
@@ -331,6 +353,7 @@ public struct ContentView: View {
         }
     }
 
+    /// Devuelve el color temático asociado al estado actual de la cabina.
     private var colorParaEstado: Color {
         switch viewModel.currentState {
         case .enVivo:

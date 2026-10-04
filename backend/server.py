@@ -1,16 +1,27 @@
+"""
+Servidor Orquestador de Cabina ResonIA (FastAPI).
+
+Integra los componentes de IA local:
+- Transcripción de audio (faster-whisper)
+- Moderación y síntesis de locución (Ollama / LLaMA 3.2:3b)
+- Síntesis de voz neural (Piper TTS)
+- Streaming en vivo por WebRTC (LiveKit)
+"""
+
 import os
-import tempfile
-import subprocess
-import traceback
+import re
 import sys
 import shutil
+import tempfile
+import logging
+import subprocess
 import asyncio
-import wave
+from typing import Optional
+
 import httpx
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from livekit import rtc
-from livekit.api import AccessToken, VideoGrants
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- PARCHE DE COMPATIBILIDAD PyAV 19 + FASTER-WHISPER ---
 import av
@@ -18,9 +29,11 @@ import av.container
 
 _orig_av_open = av.open
 
+
 def _patched_av_open(*args, **kwargs):
     kwargs.pop("metadata_errors", None)
     return _orig_av_open(*args, **kwargs)
+
 
 av.open = _patched_av_open
 if hasattr(av.container, "open"):
@@ -28,46 +41,60 @@ if hasattr(av.container, "open"):
 # ---------------------------------------------------------
 
 from faster_whisper import WhisperModel
+from locutor_bot import generar_token_acceso, emitir_audio_en_sala, LIVEKIT_URL, ROOM_NAME
 
-app = FastAPI(title="ResonIA Cabina Backend")
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("resonia-backend")
+
+# Inicialización de la aplicación FastAPI
+app = FastAPI(
+    title="ResonIA Cabina Backend",
+    description="API de procesamiento y orquestación de audio para cabina radial inteligente",
+    version="1.0.0"
+)
+
+# Configuración de CORS segura para desarrollo y clientes autorizados
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PIPER_MODEL = os.path.join(BASE_DIR, "es_ES-davefx-medium.onnx")
 AUDIO_OUTPUT = os.path.join(BASE_DIR, "respuesta.wav")
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
 
-# Configuración de LiveKit
-LIVEKIT_URL = os.getenv("LIVEKIT_URL", "ws://127.0.0.1:7880")
-LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "devkey")
-LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "secret")
-ROOM_NAME = "cabina-resonia"
+# Restricciones de seguridad para subida de audio
+MAX_AUDIO_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB máximo (suficiente para notas de voz de hasta 5 minutos)
+ALLOWED_AUDIO_EXTENSIONS = {".m4a", ".wav", ".aac", ".mp3", ".ogg", ".flac"}
 
-print("⏳ Cargando faster-whisper en memoria...")
-whisper = WhisperModel("base", device="cpu", compute_type="int8")
+logger.info("⏳ Inicializando modelo faster-whisper (base, CPU, int8)...")
+whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+logger.info("✅ faster-whisper cargado correctamente en memoria.")
 
-def generar_token(identity: str, name: str, can_publish: bool = False) -> str:
-    """Genera el JWT de autenticación para LiveKit."""
-    token = (
-        AccessToken(api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
-        .with_identity(identity)
-        .with_name(name)
-        .with_grants(
-            VideoGrants(
-                room_join=True,
-                room=ROOM_NAME,
-                can_publish=can_publish,
-                can_subscribe=True
-            )
-        )
-        .to_jwt()
-    )
-    return token
 
 def normalizar_locucion(texto: str) -> str:
-    """Garantiza que la frase comience una sola vez con la introducción y no se duplique."""
+    """
+    Normaliza el texto generado por la IA para asegurar que comience
+    exactamente una vez con la fórmula de cabina y sin frases duplicadas.
+
+    Args:
+        texto: Texto sin procesar devuelto por Ollama.
+
+    Returns:
+        Frase limpia lista para ser vocalizada.
+    """
     frase_intro = "Un oyente nos envía un mensaje que dice:"
     t = texto.strip().strip('"\'')
 
-    # Eliminar posibles anidaciones o repeticiones de la introducción
+    # Detectar y remover duplicados anidados de la introducción
     while True:
         pos1 = t.find(frase_intro)
         if pos1 != -1:
@@ -84,7 +111,17 @@ def normalizar_locucion(texto: str) -> str:
     cuerpo = t[len(frase_intro):].strip().strip('"\'')
     return f"{frase_intro} {cuerpo}"
 
+
 async def resumir_con_ollama(texto_oyente: str) -> str:
+    """
+    Consulta al modelo local en Ollama para moderar y redactar la locución radial.
+
+    Args:
+        texto_oyente: Transcripción del mensaje recibido.
+
+    Returns:
+        'RECHAZADO' si no pasa moderación, o la frase de locución terminada.
+    """
     prompt = f"""Eres el locutor y productor principal de cabina de una emisora de radio en vivo.
 Tu tarea es presentar al aire los mensajes de voz de los oyentes.
 
@@ -99,7 +136,7 @@ Responde únicamente con la frase de radio o con RECHAZADO:"""
 
     async with httpx.AsyncClient(timeout=25.0) as client:
         res = await client.post(
-            "http://localhost:11434/api/generate",
+            OLLAMA_API_URL,
             json={
                 "model": "llama3.2:3b",
                 "prompt": prompt,
@@ -111,14 +148,15 @@ Responde únicamente con la frase de radio o con RECHAZADO:"""
         )
         res.raise_for_status()
         raw_text = res.json().get("response", "").strip()
-        
+
         if "RECHAZADO" in raw_text:
             return "RECHAZADO"
 
         return normalizar_locucion(raw_text)
 
+
 def obtener_ruta_piper() -> str:
-    """Encuentra la ruta exacta del binario de Piper dentro del entorno virtual."""
+    """Encuentra la ruta al ejecutable de Piper TTS dentro del entorno virtual o PATH."""
     bin_dir = os.path.dirname(sys.executable)
     ruta_en_venv = os.path.join(bin_dir, "piper")
     if os.path.exists(ruta_en_venv):
@@ -135,11 +173,20 @@ def obtener_ruta_piper() -> str:
 
     return "piper"
 
+
 def generar_audio_piper(texto: str, output_path: str) -> bool:
+    """
+    Ejecuta el binario Piper TTS para sintetizar voz a partir de texto.
+
+    Args:
+        texto: Cadena de texto a sintetizar.
+        output_path: Ruta destino del archivo WAV.
+
+    Returns:
+        True si el archivo se generó exitosamente, False en caso contrario.
+    """
     try:
         piper_bin = obtener_ruta_piper()
-        print(f"   Ejecutando Piper desde: {piper_bin}")
-
         cmd = [
             piper_bin,
             "--model", PIPER_MODEL,
@@ -154,124 +201,94 @@ def generar_audio_piper(texto: str, output_path: str) -> bool:
         )
         return proceso.returncode == 0
     except Exception as e:
-        print(f"❌ Error ejecutando Piper: {e}")
+        logger.error("Error ejecutando Piper TTS: %s", e)
         return False
 
-async def emitir_audio_en_sala(audio_path: str):
-    """Conecta el bot Productor IA a LiveKit e inyecta el audio garantizando que no se corte al final."""
-    if not os.path.exists(audio_path):
-        print(f"❌ Error: No se encontró el archivo '{audio_path}'.")
-        return
-
-    print("🔑 Generando token para Productor IA...")
-    token = generar_token(identity="productor-ia", name="Productor IA (Cabina)", can_publish=True)
-    room = rtc.Room()
-
-    try:
-        print(f"📡 Conectando Productor IA a '{ROOM_NAME}' en {LIVEKIT_URL}...")
-        await room.connect(LIVEKIT_URL, token)
-        print("✅ Productor IA conectado a la cabina.")
-
-        with wave.open(audio_path, "rb") as wf:
-            sample_rate = wf.getframerate()
-            num_channels = wf.getnchannels()
-            sample_width = wf.getsampwidth()
-
-            source = rtc.AudioSource(sample_rate, num_channels)
-            track = rtc.LocalAudioTrack.create_audio_track("audio-productor", source)
-
-            options = rtc.TrackPublishOptions()
-            publication = await room.local_participant.publish_track(track, options)
-            print(f"🎙️ Pista de audio publicada en cabina: {publication.sid}")
-
-            chunk_samples = int(sample_rate * 0.02)
-            print("▶️ Emitiendo locución al aire a través de WebRTC...")
-            while True:
-                data = wf.readframes(chunk_samples)
-                if not data:
-                    break
-
-                samples_en_bloque = len(data) // (num_channels * sample_width)
-                frame = rtc.AudioFrame(
-                    data=data,
-                    sample_rate=sample_rate,
-                    num_channels=num_channels,
-                    samples_per_channel=samples_en_bloque
-                )
-                await source.capture_frame(frame)
-                await asyncio.sleep(0.02)
-
-            # Inyectar 300 ms de silencio final para que el códec no corte la última palabra
-            silencio = b"\x00" * (chunk_samples * num_channels * sample_width)
-            silence_frame = rtc.AudioFrame(
-                data=silencio,
-                sample_rate=sample_rate,
-                num_channels=num_channels,
-                samples_per_channel=chunk_samples
-            )
-            for _ in range(15):
-                await source.capture_frame(silence_frame)
-                await asyncio.sleep(0.02)
-
-            print("⏹️ Emisión de frames completada. Esperando drenado de buffers WebRTC...")
-            await asyncio.sleep(1.8)
-
-            await room.local_participant.unpublish_track(publication.sid)
-            await asyncio.sleep(0.3)
-
-    except Exception as e:
-        print(f"❌ Error durante la emisión en LiveKit: {e}")
-    finally:
-        print("🔌 Desconectando Productor IA...")
-        await room.disconnect()
-        print("👋 Productor IA desconectado.")
 
 @app.get("/token")
-async def obtener_token(identity: str = "oyente", name: str = "Oyente"):
-    """Devuelve un token JWT para que los clientes iOS se conecten automáticamente a LiveKit."""
-    token = generar_token(identity=identity, name=name, can_publish=False)
+async def obtener_token(
+    identity: str = Query("oyente", max_length=64, description="Identificador del oyente"),
+    name: str = Query("Oyente", max_length=64, description="Nombre legible del participante")
+):
+    """
+    Genera un token JWT seguro para que los clientes se conecten a la sala WebRTC.
+    Sanitiza los parámetros para prevenir inyecciones.
+    """
+    clean_identity = re.sub(r"[^\w\-\.]", "", identity)[:64] or "oyente"
+    clean_name = re.sub(r"[^\w\s\-\.]", "", name)[:64] or "Oyente"
+
+    token = generar_token_acceso(identity=clean_identity, name=clean_name, can_publish=False)
     return {
         "status": "success",
         "room": ROOM_NAME,
-        "identity": identity,
+        "identity": clean_identity,
         "token": token,
         "server_url": LIVEKIT_URL
     }
 
+
 @app.post("/procesar-audio")
 async def procesar_audio(file: UploadFile = File(...)):
+    """
+    Endpoint principal de procesamiento de notas de voz:
+    1. Valida extensión y tamaño del archivo.
+    2. Transcribe con faster-whisper.
+    3. Modera y resume con Ollama.
+    4. Genera voz con Piper TTS.
+    5. Transmite el audio automáticamente a la sala LiveKit en segundo plano.
+    """
+    # Validación segura del nombre de archivo y extensión
+    filename = file.filename or "nota.m4a"
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Formato no permitido ({extension}). Formatos válidos: {list(ALLOWED_AUDIO_EXTENSIONS)}"
+        )
+
     temp_path = None
     try:
-        print(f"\n📥 [1/4] Audio recibido: {file.filename}")
+        logger.info("📥 [1/4] Recibiendo archivo de audio: %s", filename)
 
-        suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            contenido = await file.read()
+        # Control de tamaño máximo para prevenir saturación de memoria o disco
+        contenido = await file.read(MAX_AUDIO_SIZE_BYTES + 1)
+        if len(contenido) > MAX_AUDIO_SIZE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"El archivo excede el tamaño máximo permitido ({MAX_AUDIO_SIZE_BYTES // (1024 * 1024)} MB)"
+            )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
             temp_file.write(contenido)
             temp_path = temp_file.name
 
-        print("🎙️ [2/4] Transcribiendo con faster-whisper...")
-        segments, _ = whisper.transcribe(temp_path, language="es")
+        # Transcripción con Whisper
+        logger.info("🎙️ [2/4] Transcribiendo voz con faster-whisper...")
+        segments, _ = whisper_model.transcribe(temp_path, language="es")
         texto_transcrito = " ".join([s.text for s in segments]).strip()
-        print(f"   Texto detectado: \"{texto_transcrito}\"")
+        logger.info("   Texto detectado: '%s'", texto_transcrito)
 
         if not texto_transcrito:
-            return {"status": "error", "mensaje": "No se detectó voz en el audio"}
+            return {
+                "status": "error",
+                "mensaje": "No se detectó contenido de voz en el audio enviado"
+            }
 
-        print("🧠 [3/4] Consultando a Ollama...")
+        # Moderación y redacción radial con Ollama
+        logger.info("🧠 [3/4] Moderando y resumiendo con Ollama...")
         resumen = await resumir_con_ollama(texto_transcrito)
-        print(f"   Respuesta procesada: \"{resumen}\"")
+        logger.info("   Resultado: '%s'", resumen)
 
         es_limpio = "RECHAZADO" not in resumen
-
         audio_generado = False
+
         if es_limpio:
-            print("🔊 [4/4] Generando locución con Piper TTS...")
+            # Síntesis con Piper TTS
+            logger.info("🔊 [4/4] Sintetizando locución con Piper TTS...")
             audio_generado = generar_audio_piper(resumen, AUDIO_OUTPUT)
-            print(f"   Audio generado exitosamente: {audio_generado}")
 
             if audio_generado:
-                print("📡 [Auto-Broadcast] Lanzando locución a la sala LiveKit en segundo plano...")
+                logger.info("📡 [Auto-Broadcast] Transmitiendo audio a LiveKit en segundo plano...")
                 asyncio.create_task(emitir_audio_en_sala(AUDIO_OUTPUT))
 
         return {
@@ -283,21 +300,29 @@ async def procesar_audio(file: UploadFile = File(...)):
             "archivo_audio": "respuesta.wav" if audio_generado else None
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("Error procesando audio: %s", e)
         return {
             "status": "error",
-            "detalle_error": str(e)
+            "mensaje": "Ocurrió un error interno durante el procesamiento del audio."
         }
     finally:
         if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
 
 @app.get("/escuchar-respuesta")
 async def escuchar_respuesta():
+    """Descarga el último archivo WAV generado por Piper TTS."""
     if os.path.exists(AUDIO_OUTPUT):
         return FileResponse(AUDIO_OUTPUT, media_type="audio/wav")
     return {"status": "error", "mensaje": "Aún no se ha generado ningún audio"}
+
 
 if __name__ == "__main__":
     import uvicorn
