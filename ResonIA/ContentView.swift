@@ -55,6 +55,12 @@ public struct ContentView: View {
             .sheet(isPresented: $showingSettings) {
                 configuracionSheet
             }
+            .onAppear {
+                // Auto-sintonizar la cabina al abrir la app
+                if viewModel.liveKitService.connectionState == .disconnected {
+                    viewModel.conectarAutomaticamente()
+                }
+            }
         }
     }
 
@@ -82,18 +88,30 @@ public struct ContentView: View {
 
             Spacer()
 
-            // Indicador de oyentes conectados
-            HStack(spacing: 5) {
-                Image(systemName: "person.2.fill")
-                    .font(.caption)
-                Text("\(viewModel.liveKitService.participantCount)")
-                    .font(.caption.bold())
+            if viewModel.liveKitService.connectionState == .disconnected {
+                Button("Sintonizar") {
+                    viewModel.conectarAutomaticamente()
+                }
+                .font(.caption.bold())
+                .foregroundColor(.cyan)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.cyan.opacity(0.15))
+                .clipShape(Capsule())
+            } else {
+                // Indicador de oyentes conectados
+                HStack(spacing: 5) {
+                    Image(systemName: "person.2.fill")
+                        .font(.caption)
+                    Text("\(viewModel.liveKitService.participantCount)")
+                        .font(.caption.bold())
+                }
+                .foregroundColor(.white.opacity(0.8))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Capsule())
             }
-            .foregroundColor(.white.opacity(0.8))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.white.opacity(0.08))
-            .clipShape(Capsule())
         }
         .padding()
         .background(Color(red: 0.10, green: 0.12, blue: 0.18))
@@ -285,13 +303,16 @@ public struct ContentView: View {
                         Button("Conectar a Cabina") {
                             viewModel.conectarACabina()
                         }
-                        .disabled(viewModel.token.isEmpty)
                     }
                 }
 
                 Section("Servidor de IA (FastAPI)") {
                     TextField("Endpoint FastAPI", text: $viewModel.fastAPIURL)
                         .autocorrectionDisabled()
+
+                    Button("Re-sintonizar con Servidor") {
+                        viewModel.conectarAutomaticamente()
+                    }
                 }
 
                 Section("Información del Oyente") {

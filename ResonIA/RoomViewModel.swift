@@ -94,11 +94,39 @@ public final class RoomViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    // MARK: - Acciones de LiveKit
+    // MARK: - Conexión Automática con Backend
+
+    public func conectarAutomaticamente() {
+        currentState = .conectando
+        statusMessage = "Solicitando credenciales a cabina..."
+        errorMessage = nil
+
+        Task {
+            do {
+                let tokenInfo = try await apiService.obtenerToken(
+                    identity: listenerIdentity,
+                    baseURLString: fastAPIURL
+                )
+
+                self.token = tokenInfo.token
+                self.roomName = tokenInfo.room
+                self.liveKitURL = tokenInfo.serverUrl
+                self.statusMessage = "Conectando a cabina en vivo..."
+
+                try await liveKitService.connect(url: self.liveKitURL, token: self.token)
+                self.currentState = .enVivo
+                self.statusMessage = "En vivo en \(self.roomName)"
+            } catch {
+                self.currentState = .error(error.localizedDescription)
+                self.errorMessage = "Error al enlazar con la cabina: \(error.localizedDescription)"
+                self.statusMessage = "Fallo de conexión"
+            }
+        }
+    }
 
     public func conectarACabina() {
-        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "Ingresa un token válido de LiveKit para conectar."
+        if token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            conectarAutomaticamente()
             return
         }
 
@@ -173,12 +201,12 @@ public final class RoomViewModel: ObservableObject {
                 self.lastResponse = response
 
                 if response.aprobado == true {
-                    self.statusMessage = "Nota aprobada. Piper TTS generando locución..."
+                    self.statusMessage = "Nota aprobada. Productor IA saldrá al aire..."
                 } else {
                     self.statusMessage = "Nota filtrada por moderación."
                 }
 
-                // Restaurar estado según conexión LiveKit
+                // Restaurar estado según conexión LiveKit tras breve pausa
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if self.currentState != .locutorAlAire {
                     self.currentState = self.liveKitService.connectionState == .connected ? .enVivo : .desconectado

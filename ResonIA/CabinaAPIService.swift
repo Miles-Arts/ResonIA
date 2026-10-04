@@ -1,11 +1,50 @@
 import Foundation
 
+public struct TokenResponse: Codable, Sendable {
+    public let status: String
+    public let room: String
+    public let identity: String
+    public let token: String
+    public let serverUrl: String
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case room
+        case identity
+        case token
+        case serverUrl = "server_url"
+    }
+}
+
 public final class CabinaAPIService: Sendable {
     public static let shared = CabinaAPIService()
 
     private let defaultBaseURL = "http://127.0.0.1:8000"
 
     public init() {}
+
+    /// Obtiene automáticamente un token JWT para conectar a la sala LiveKit
+    public func obtenerToken(
+        identity: String,
+        baseURLString: String? = nil
+    ) async throws -> TokenResponse {
+        let host = baseURLString ?? defaultBaseURL
+        var components = URLComponents(string: "\(host)/token")
+        components?.queryItems = [
+            URLQueryItem(name: "identity", value: identity),
+            URLQueryItem(name: "name", value: "Oyente iOS")
+        ]
+        guard let url = components?.url else {
+            throw URLError(.badURL)
+        }
+
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+
+        return try JSONDecoder().decode(TokenResponse.self, from: data)
+    }
 
     public func procesarAudio(
         fileURL: URL,
